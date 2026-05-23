@@ -36,6 +36,6 @@ def test_data_audit_endpoint_returns_audit_shape():
     response = client.get("/api/data-audit")
     assert response.status_code == 200
     data = response.json()
-    assert data["data_source"] == "sample"
+    assert data["data_source"] in {"sample", "csv"}
     assert data["audit"]
     assert {"sector", "usable_from", "audit_status"} <= set(data["audit"][0])

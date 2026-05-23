@@ -64,6 +64,27 @@ def _cached_dashboard(config_key: str, date: str | None) -> dict[str, Any]:
     return build_dashboard(provider.frame(), config, date)
 
 
+@lru_cache(maxsize=16)
+def _cached_mvb(config_key: str) -> dict[str, Any]:
+    config = json.loads(config_key)
+    provider = get_provider(config["data_source"], config)
+    return run_mvb(provider.frame(), config)
+
+
+@lru_cache(maxsize=16)
+def _cached_backtest(config_key: str) -> dict[str, Any]:
+    config = json.loads(config_key)
+    provider = get_provider(config["data_source"], config)
+    return run_full_backtest(provider.frame(), config)
+
+
+@lru_cache(maxsize=16)
+def _cached_trial_run(config_key: str, mode: str) -> dict[str, Any]:
+    config = json.loads(config_key)
+    provider = get_provider(config["data_source"], config)
+    return build_trial_run(provider.frame(), config, mode=mode)
+
+
 @app.get("/api/config")
 def get_config() -> dict[str, Any]:
     provider, config = _provider_and_config()
@@ -85,19 +106,19 @@ def get_data_audit() -> dict[str, Any]:
 @app.get("/api/mvb")
 def get_mvb() -> dict[str, Any]:
     provider, config = _provider_and_config()
-    return _json_safe(run_mvb(provider.frame(), config))
+    return _json_safe(_cached_mvb(_config_key(config)))
 
 
 @app.get("/api/backtest")
 def get_backtest() -> dict[str, Any]:
     provider, config = _provider_and_config()
-    return _json_safe(run_full_backtest(provider.frame(), config))
+    return _json_safe(_cached_backtest(_config_key(config)))
 
 
 @app.get("/api/trial-run")
 def get_trial_run(mode: str = Query(default="paper")) -> dict[str, Any]:
     provider, config = _provider_and_config()
-    return _json_safe(build_trial_run(provider.frame(), config, mode=mode))
+    return _json_safe(_cached_trial_run(_config_key(config), mode))
 
 
 @app.get("/api/dashboard")

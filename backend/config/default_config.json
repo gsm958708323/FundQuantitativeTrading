@@ -1,5 +1,6 @@
 {
-  "data_source": "sample",
+  "data_source": "csv",
+  "data_path": "data/real_market.csv",
   "base_amount": 2000,
   "max_selected_sectors": 3,
   "cash_rate": 0.02,
@@ -30,6 +31,7 @@
     "k": 1.0
   },
   "exit": {
+    "enabled": false,
     "l1_percentile": 80,
     "l1_profit": 50,
     "l2_percentile": 90,

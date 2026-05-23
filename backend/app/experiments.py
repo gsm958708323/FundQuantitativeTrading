@@ -68,10 +68,13 @@ def _trend_gate(frame: pd.DataFrame, config: dict[str, Any]) -> dict[str, Any]:
 
 
 def _tiered_exit(frame: pd.DataFrame, config: dict[str, Any]) -> dict[str, Any]:
-    full = StrategyEngine(frame, config).run_simulation()
+    enabled_exit_config = copy.deepcopy(config)
+    enabled_exit_config["exit"] = {**enabled_exit_config["exit"], "enabled": True}
+    full = StrategyEngine(frame, enabled_exit_config).run_simulation()
     no_exit_config = copy.deepcopy(config)
     no_exit_config["exit"] = {
         **no_exit_config["exit"],
+        "enabled": False,
         "l1_percentile": 101,
         "l1_profit": 999,
         "l2_percentile": 101,

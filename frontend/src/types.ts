@@ -123,6 +123,7 @@ export type FullBacktestResponse = {
   baselines: Record<string, Record<string, number | string | boolean>>;
   ablation: Record<string, unknown>;
   checks: Record<string, { passed: boolean; details: string }>;
+  diagnostics: Record<string, { severity: string; details: string }>;
   worst_periods: Array<{ start: string; end: string; return: number }>;
 };
 

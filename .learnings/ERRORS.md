@@ -101,3 +101,89 @@ Use the approved `npm run build` escalation rule when sandboxed builds hit Windo
 - Related Files: frontend/vite.config.ts
 
 ---
+
+## [ERR-20260523-004] pip_akshare_network_sandbox
+
+**Logged**: 2026-05-23T00:00:00+08:00
+**Priority**: low
+**Status**: resolved
+**Area**: infra
+
+### Summary
+Installing AkShare inside the default sandbox failed because PyPI network access was blocked; rerunning with approved escalation succeeded.
+
+### Error
+```text
+Failed to establish a new connection: [WinError 10013]
+No matching distribution found for akshare==1.16.98
+```
+
+### Context
+- Command attempted: `python -m pip install -r requirements.txt`
+- The initially guessed version was also wrong; corrected to `akshare==1.18.63`.
+
+### Suggested Fix
+Use the current PyPI version and request network escalation for dependency installation.
+
+### Metadata
+- Reproducible: yes
+- Related Files: backend/requirements.txt
+
+---
+
+## [ERR-20260523-005] powershell_python_heredoc
+
+**Logged**: 2026-05-23T00:00:00+08:00
+**Priority**: low
+**Status**: resolved
+**Area**: infra
+
+### Summary
+PowerShell does not support Bash-style `python - <<'PY'` heredocs; use a PowerShell here-string piped into Python.
+
+### Error
+```text
+重定向运算符后面缺少文件规范。
+```
+
+### Context
+- Failed pattern: `python - <<'PY'`
+- Working pattern: `@' ... '@ | python -`
+
+### Suggested Fix
+Use PowerShell-native here-strings for inline Python scripts.
+
+### Metadata
+- Reproducible: yes
+- Related Files: none
+
+---
+
+## [ERR-20260523-006] real_backtest_test_runtime
+
+**Logged**: 2026-05-23T00:00:00+08:00
+**Priority**: medium
+**Status**: pending
+**Area**: tests
+
+### Summary
+After switching default data source to the real CSV, the full backend test suite passed but took about 8 minutes because validation endpoints compute full backtests.
+
+### Error
+```text
+command timed out after 360566 milliseconds
+```
+
+### Context
+- Command attempted: `python -m pytest`
+- Working rerun: `python -m pytest` with a 900 second timeout
+- Result: 24 passed in 480.24s
+
+### Suggested Fix
+Split slow validation tests, add persistent report caching, or use sample-data overrides for endpoint shape tests while keeping a separate real-data integration test.
+
+### Metadata
+- Reproducible: yes
+- Related Files: backend/app/backtest.py, backend/tests/test_validation_stages.py
+
+---

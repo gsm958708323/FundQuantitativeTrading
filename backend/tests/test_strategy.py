@@ -199,3 +199,13 @@ def test_csv_provider_audits_usable_from_and_missing_ratios(tmp_path):
     assert audit[0]["usable_from"] == "2025-01-03"
     assert audit[0]["missing_valuation_ratio"] == 0.5
     assert audit[0]["audit_status"] == "fail"
+
+
+def test_engine_dates_start_after_all_sectors_have_data():
+    frame = generate_sample_data()
+    frame = frame[~((frame["sector"] == "半导体") & (frame["date"] < "2024-06-03"))]
+    config = load_config()
+
+    engine = StrategyEngine(frame, config)
+
+    assert engine.dates_until()[0] >= "2024-06-03"

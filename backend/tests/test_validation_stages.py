@@ -56,6 +56,25 @@ def test_full_backtest_reports_return_against_planned_contributions():
     assert report["summary"]["planned_return"] == round((report["summary"]["total_assets"] - 36000) / 36000 * 100, 2)
 
 
+def test_full_backtest_reports_deployment_ratio_and_warning():
+    from app.backtest import run_full_backtest
+
+    report = run_full_backtest(generate_sample_data(), load_config())
+
+    assert report["summary"]["deployment_ratio"] < 60
+    assert "low_deployment" in report["diagnostics"]
+    assert report["diagnostics"]["low_deployment"]["severity"] == "warning"
+
+
+def test_default_strategy_disables_exit_module_after_negative_ablation():
+    from app.backtest import run_full_backtest
+
+    report = run_full_backtest(generate_sample_data(), load_config())
+
+    assert load_config()["exit"]["enabled"] is False
+    assert report["summary"]["planned_return"] == report["ablation"]["exit"]["without_module"]["planned_return"]
+
+
 def test_trial_run_plan_produces_manual_execution_checklist():
     from app.trial import build_trial_run
 

@@ -15,6 +15,7 @@ def run_full_backtest(frame: pd.DataFrame, config: dict[str, Any]) -> dict[str, 
         **dashboard["portfolio"],
         "max_drawdown": max_drawdown(dashboard_curve(dashboard)),
     }
+    _attach_deployment_metrics(smart)
     budget = float(config["base_amount"])
     first_sector = config["sectors"][0]
     same_fund = simple_dca(frame, first_sector, budget, elastic=False)
@@ -36,6 +37,7 @@ def run_full_backtest(frame: pd.DataFrame, config: dict[str, Any]) -> dict[str, 
             "exit": _exit_ablation(frame, config),
         },
         "checks": _acceptance_checks(dashboard),
+        "diagnostics": _diagnostics(smart),
         "worst_periods": _worst_periods(dashboard),
     }
 
@@ -63,10 +65,13 @@ def _valuation_ablation(frame: pd.DataFrame, config: dict[str, Any]) -> dict[str
 
 
 def _exit_ablation(frame: pd.DataFrame, config: dict[str, Any]) -> dict[str, Any]:
-    full = StrategyEngine(frame, config).run_simulation()
+    enabled_exit_config = copy.deepcopy(config)
+    enabled_exit_config["exit"] = {**enabled_exit_config["exit"], "enabled": True}
+    full = StrategyEngine(frame, enabled_exit_config).run_simulation()
     no_exit_config = copy.deepcopy(config)
     no_exit_config["exit"] = {
         **no_exit_config["exit"],
+        "enabled": False,
         "l1_percentile": 101,
         "l1_profit": 999,
         "l2_percentile": 101,
@@ -75,10 +80,28 @@ def _exit_ablation(frame: pd.DataFrame, config: dict[str, Any]) -> dict[str, Any
         "l4_drawdown": 999,
     }
     no_exit = StrategyEngine(frame, no_exit_config).run_simulation()
-    return {
-        "without_module": {**no_exit["portfolio"], "max_drawdown": max_drawdown(dashboard_curve(no_exit))},
-        "with_module": {**full["portfolio"], "max_drawdown": max_drawdown(dashboard_curve(full))},
-    }
+    without_module = {**no_exit["portfolio"], "max_drawdown": max_drawdown(dashboard_curve(no_exit))}
+    with_module = {**full["portfolio"], "max_drawdown": max_drawdown(dashboard_curve(full))}
+    _attach_deployment_metrics(without_module)
+    _attach_deployment_metrics(with_module)
+    return {"without_module": without_module, "with_module": with_module}
+
+
+def _attach_deployment_metrics(summary: dict[str, Any]) -> None:
+    planned = float(summary.get("total_planned") or 0)
+    invested = float(summary.get("total_invested") or 0)
+    summary["deployment_ratio"] = round(invested / planned * 100, 2) if planned else 0.0
+
+
+def _diagnostics(summary: dict[str, Any]) -> dict[str, Any]:
+    diagnostics: dict[str, Any] = {}
+    deployment = float(summary.get("deployment_ratio", 0))
+    if deployment < 70:
+        diagnostics["low_deployment"] = {
+            "severity": "warning",
+            "details": f"资金利用率 {deployment}% 低于 70%，收益主要受现金闲置拖累",
+        }
+    return diagnostics
 
 
 def _acceptance_checks(dashboard: dict[str, Any]) -> dict[str, dict[str, Any]]:

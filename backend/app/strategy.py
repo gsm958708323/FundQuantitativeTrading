@@ -437,7 +437,13 @@ class StrategyEngine:
         }
 
     def dates_until(self, end_date: str | None = None) -> list[str]:
-        dates = sorted(self.frame["date"].unique().tolist())
+        start_dates = [
+            str(self._series_cache[sector].index.min())
+            for sector in [self.benchmark, *self.sectors]
+            if not self._series_cache[sector].empty
+        ]
+        common_start = max(start_dates) if start_dates else ""
+        dates = sorted(date for date in self.frame["date"].unique().tolist() if date >= common_start)
         if end_date:
             dates = [date for date in dates if date <= end_date]
         return dates
@@ -672,6 +678,8 @@ class StrategyEngine:
         reserve: ReservePool,
         actions: list[dict[str, Any]],
     ) -> None:
+        if not bool(self.config.get("exit", {}).get("enabled", True)):
+            return
         for sector, position in positions.items():
             if position.cumulative_invested <= 0 or position.shares <= 0:
                 continue
