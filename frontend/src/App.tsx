@@ -418,15 +418,15 @@ function App() {
         />
         <KpiCard
           icon={<Activity size={20} />}
-          label="账户收益"
-          value={formatPct(dashboard.portfolio.account_return)}
-          meta={`利润 ${formatMoney(dashboard.portfolio.total_profit)}`}
+          label="计划收益"
+          value={formatPct(dashboard.portfolio.planned_return)}
+          meta={`资金部署 ${formatPct(dashboard.portfolio.deployment_ratio)}`}
         />
         <KpiCard
           icon={<CheckCircle2 size={20} />}
           label="通过门控"
           value={`${dashboard.signals.filter((item) => item.gate_pass).length}/${dashboard.signals.length}`}
-          meta={`月预算 ${formatMoney(dashboard.portfolio.base_amount)}`}
+          meta={`现金拖累 ${formatPct(dashboard.portfolio.cash_drag)}`}
         />
       </section>
 

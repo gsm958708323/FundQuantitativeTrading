@@ -5,6 +5,7 @@ export type SectorSignal = {
   rs_score: number;
   rs_strong: boolean;
   ma_state: "上升" | "震荡" | "下降";
+  gate_weight: number;
   gate_pass: boolean;
   valuation_percentile: number;
   attention_rank_pct: number;
@@ -29,9 +30,14 @@ export type PortfolioState = {
   cash_management: number;
   market_value: number;
   total_invested: number;
+  total_planned: number;
   total_assets: number;
   total_profit: number;
   account_return: number;
+  planned_profit: number;
+  planned_return: number;
+  deployment_ratio: number;
+  cash_drag: number;
   cash_rate: number;
 };
 

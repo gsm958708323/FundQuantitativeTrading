@@ -56,14 +56,14 @@ def test_full_backtest_reports_return_against_planned_contributions():
     assert report["summary"]["planned_return"] == round((report["summary"]["total_assets"] - 36000) / 36000 * 100, 2)
 
 
-def test_full_backtest_reports_deployment_ratio_and_warning():
+def test_full_backtest_reports_deployment_ratio_and_cash_drag():
     from app.backtest import run_full_backtest
 
     report = run_full_backtest(generate_sample_data(), load_config())
 
-    assert report["summary"]["deployment_ratio"] < 60
-    assert "low_deployment" in report["diagnostics"]
-    assert report["diagnostics"]["low_deployment"]["severity"] == "warning"
+    assert report["summary"]["deployment_ratio"] >= 60
+    assert "cash_drag" in report["summary"]
+    assert "low_deployment" not in report["diagnostics"]
 
 
 def test_default_strategy_disables_exit_module_after_negative_ablation():

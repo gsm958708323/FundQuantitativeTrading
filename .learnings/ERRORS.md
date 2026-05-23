@@ -4,6 +4,35 @@ Command failures and integration errors.
 
 ---
 
+## [ERR-20260523-007] start_process_path_collision
+
+**Logged**: 2026-05-23T00:00:00+08:00
+**Priority**: low
+**Status**: pending
+**Area**: infra
+
+### Summary
+PowerShell `Start-Process` failed in this Windows environment due to duplicate `Path`/`PATH` keys in the inherited environment block.
+
+### Error
+```text
+Start-Process : 已添加项。字典中的关键字:“Path”所添加的关键字:“PATH”
+```
+
+### Context
+- Commands attempted: background `python -m uvicorn ...` and `npm.cmd run dev ...` with `Start-Process`.
+- The failure happened before the dev servers started.
+- Tests and builds were unaffected.
+
+### Suggested Fix
+Use an alternate background process launcher that normalizes environment keys first, or run foreground dev servers from the terminal when interactive verification is needed.
+
+### Metadata
+- Reproducible: unknown
+- Related Files: none
+
+---
+
 ## 2026-05-23 - PowerShell foreach pipeline parse error
 
 **Command Context:** While inspecting local Codex cache directories, a one-line PowerShell command attempted to pipe directly after a `foreach` statement.

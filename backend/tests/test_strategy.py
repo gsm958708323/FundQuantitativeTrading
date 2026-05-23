@@ -5,9 +5,11 @@ import pandas as pd
 from app.strategy import (
     ExitManager,
     ExitTracker,
+    MomentumScorer,
     Position,
     ReservePool,
     StrategyEngine,
+    TrendGate,
     ValuationEngine,
     build_dashboard,
 )
@@ -19,6 +21,25 @@ def test_hard_stop_multiplier_is_zero():
     assert engine.multiplier(80) == 0
     assert engine.multiplier(92) == 0
     assert engine.multiplier(50) == 1
+
+
+def test_momentum_uses_6_1_and_12_1_skip_month_returns():
+    values = pd.Series([100.0] * 300)
+    values.iloc[-22] = 150.0
+    values.iloc[-1] = 300.0
+    scorer = MomentumScorer({"mode": "relative_6_1_12_1", "skip_days": 21, "weights": {"126": 0.5, "252": 0.5}})
+
+    assert scorer.score(values) == 50.0
+
+
+def test_trend_gate_returns_continuous_weight_for_partial_confirmation():
+    prices = pd.Series([100.0] * 200)
+    gate = TrendGate(ma_short=60, ma_long=120, slope_period=20, min_weight=0.35)
+
+    weight = gate.weight(prices, momentum=5, rs_score=65)
+
+    assert 0 < weight < 1
+    assert gate.gate_pass(prices, momentum=5, rs_strong=True)
 
 
 def test_reserve_pool_routes_overflow_to_cash_management():
@@ -88,6 +109,40 @@ def test_l2_requires_two_consecutive_rs_weak_checks():
     assert second["action"] == "sell_1_3"
 
 
+def test_exit_reduces_to_lower_target_weight_not_fixed_fraction():
+    frame = generate_sample_data()
+    config = load_config({"exit": {"enabled": True}, "portfolio_limits": {"single_sector": 0.3}})
+    engine = StrategyEngine(frame, config)
+    positions = {sector: Position() for sector in engine.trade_sectors}
+    positions["科技"].buy(10000, 1.0, "2024-01-02")
+    trackers = {sector: ExitTracker(level=1, r_peak=0.4) for sector in config["sectors"]}
+    reserve = ReservePool(base_amount=2000)
+    actions: list[dict] = []
+    nav = float(engine._series_cache["科技"].loc[:"2025-06-30"].iloc[-1]["fund_nav"])
+
+    engine._update_exits(
+        "2025-06-30",
+        {
+            "科技": {
+                "fund_nav": nav,
+                "valuation_percentile": 95,
+                "rs_strong": False,
+                "ma_state": "上升",
+                "momentum_score": 10,
+                "gate_pass": True,
+                "asi": None,
+            }
+        },
+        positions,
+        trackers,
+        reserve,
+        actions,
+    )
+
+    assert actions[-1]["action"] == "target_weight_reduce"
+    assert round(positions["科技"].market_value(nav), 2) == round(10000 * nav * 0.3 * 0.67, 2)
+
+
 def test_account_profit_does_not_double_count_redeemed_cash():
     config = load_config()
     engine = StrategyEngine(generate_sample_data(), config)
@@ -106,7 +161,7 @@ def test_account_profit_does_not_double_count_redeemed_cash():
 def test_buy_actions_record_signal_order_nav_and_settlement_dates():
     config = load_config()
     result = build_dashboard(generate_sample_data(), config)
-    buy = next(action for action in result["actions"] if action["action"] == "buy")
+    buy = next(action for action in result["actions"] if action["action"] == "buy" and action["sector"] != config["benchmark"])
 
     assert buy["signal_date"] < buy["date"]
     assert buy["order_date"] == buy["date"]
@@ -143,6 +198,32 @@ def test_l1_exit_state_blocks_new_monthly_buying():
 
     assert not any(action["action"] == "buy" for action in actions)
     assert round(reserve.tactical, 2) == 2000
+
+
+def test_monthly_budget_flows_to_core_when_satellites_are_blocked():
+    frame = generate_sample_data()
+    config = load_config(
+        {
+            "allocation": {
+                "enabled": True,
+                "core_sector": "沪深300",
+                "core_ratio": 0.6,
+                "satellite_ratio": 0.3,
+                "reserve_ratio": 0.1,
+                "fallback_to_core": True,
+            },
+            "valuation": {"hard_stop_percentile": -1},
+        }
+    )
+
+    result = build_dashboard(frame, config)
+    buy_actions = [action for action in result["actions"] if action["action"] == "buy"]
+    core_buys = [action for action in buy_actions if action["sector"] == "沪深300"]
+
+    assert core_buys
+    assert not [action for action in buy_actions if action["sector"] != "沪深300"]
+    assert result["portfolio"]["deployment_ratio"] >= 85
+    assert result["portfolio"]["cash_management"] == 0
 
 
 def test_portfolio_single_sector_limit_caps_new_exposure():

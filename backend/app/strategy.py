@@ -58,11 +58,22 @@ def redemption_fee_rate(buy_date: str, sell_date: str) -> float:
 
 
 class MomentumScorer:
-    def __init__(self, weights: dict[str, float] | None = None):
-        self.weights = {int(k): float(v) for k, v in (weights or {"20": 0.2, "60": 0.3, "120": 0.5}).items()}
+    def __init__(self, config: dict[str, Any] | None = None):
+        config = config or {"weights": {"20": 0.2, "60": 0.3, "120": 0.5}}
+        if "weights" in config:
+            self.mode = str(config.get("mode", "weighted_roc"))
+            self.skip_days = int(config.get("skip_days", 0))
+            weights = config["weights"]
+        else:
+            self.mode = "weighted_roc"
+            self.skip_days = 0
+            weights = config
+        self.weights = {int(k): float(v) for k, v in weights.items()}
 
     def score(self, prices: pd.Series) -> float:
         values = prices.dropna().astype(float)
+        if self.mode == "relative_6_1_12_1":
+            return self._skip_month_score(values)
         if len(values) < max(self.weights) + 1:
             return 0.0
         latest = values.iloc[-1]
@@ -71,6 +82,18 @@ class MomentumScorer:
             past = values.iloc[-days - 1]
             if past:
                 score += weight * ((latest - past) / past * 100)
+        return round(score, 4)
+
+    def _skip_month_score(self, values: pd.Series) -> float:
+        if len(values) < max(self.weights) + self.skip_days + 1:
+            return 0.0
+        score = 0.0
+        end_price = values.iloc[-self.skip_days - 1] if self.skip_days else values.iloc[-1]
+        for days, weight in self.weights.items():
+            start_index = self.skip_days + days + 1
+            start_price = values.iloc[-start_index]
+            if start_price:
+                score += weight * ((end_price - start_price) / start_price * 100)
         return round(score, 4)
 
 
@@ -103,10 +126,11 @@ class RSAnalyzer:
 
 
 class TrendGate:
-    def __init__(self, ma_short: int = 60, ma_long: int = 120, slope_period: int = 20):
+    def __init__(self, ma_short: int = 60, ma_long: int = 120, slope_period: int = 20, min_weight: float = 0.35):
         self.ma_short = ma_short
         self.ma_long = ma_long
         self.slope_period = slope_period
+        self.min_weight = min_weight
 
     def state(self, prices: pd.Series) -> str:
         values = prices.dropna().astype(float)
@@ -126,7 +150,19 @@ class TrendGate:
         return "震荡"
 
     def gate_pass(self, prices: pd.Series, momentum: float, rs_strong: bool) -> bool:
-        return self.state(prices) == "上升" and momentum > 0 and rs_strong
+        return self.weight(prices, momentum, 100.0 if rs_strong else 0.0) >= self.min_weight
+
+    def weight(self, prices: pd.Series, momentum: float, rs_score: float) -> float:
+        state = self.state(prices)
+        if state == "上升":
+            ma_component = 1.0
+        elif state == "震荡":
+            ma_component = 0.45
+        else:
+            ma_component = 0.0
+        momentum_component = clamp((momentum + 10) / 35, 0, 1)
+        rs_component = clamp(rs_score, 0, 100) / 100
+        return round(0.45 * ma_component + 0.35 * momentum_component + 0.20 * rs_component, 4)
 
 
 class ValuationEngine:
@@ -421,25 +457,29 @@ class StrategyEngine:
         self.config = config
         self.sectors = list(config["sectors"])
         self.benchmark = str(config["benchmark"])
-        self.scorer = MomentumScorer(config["momentum"]["weights"])
+        self.allocation = config.get("allocation", {})
+        self.core_sector = str(self.allocation.get("core_sector", self.benchmark))
+        self.trade_sectors = list(dict.fromkeys([self.core_sector, *self.sectors]))
+        self.scorer = MomentumScorer(config["momentum"])
         self.rs = RSAnalyzer(int(config["rs"]["ma_period"]))
         self.gate = TrendGate(
             int(config["gate"]["ma_short"]),
             int(config["gate"]["ma_long"]),
             int(config["gate"]["slope_period"]),
+            float(config["gate"].get("min_weight", 0.35)),
         )
         self.valuation = ValuationEngine(config["valuation"])
         self.exit_manager = ExitManager(config["exit"])
         self._signal_cache: dict[str, list[dict[str, Any]]] = {}
         self._series_cache = {
             sector: self.frame[self.frame["sector"] == sector].set_index("date").sort_index()
-            for sector in [self.benchmark, *self.sectors]
+            for sector in list(dict.fromkeys([self.benchmark, *self.trade_sectors]))
         }
 
     def dates_until(self, end_date: str | None = None) -> list[str]:
         start_dates = [
             str(self._series_cache[sector].index.min())
-            for sector in [self.benchmark, *self.sectors]
+            for sector in list(dict.fromkeys([self.benchmark, *self.trade_sectors]))
             if not self._series_cache[sector].empty
         ]
         common_start = max(start_dates) if start_dates else ""
@@ -462,7 +502,8 @@ class StrategyEngine:
             rs_strong = self.rs.is_strong(prices, benchmark_series)
             rs_score = self.rs.score(prices, benchmark_series)
             ma_state = self.gate.state(prices)
-            gate_pass = self.gate.gate_pass(prices, momentum, rs_strong)
+            gate_weight = self.gate.weight(prices, momentum, rs_score)
+            gate_pass = gate_weight >= float(self.config["gate"].get("min_weight", 0.35))
             latest = sector_frame.iloc[-1]
             raw.append(
                 {
@@ -471,6 +512,7 @@ class StrategyEngine:
                     "rs_strong": rs_strong,
                     "rs_score": rs_score,
                     "ma_state": ma_state,
+                    "gate_weight": gate_weight,
                     "gate_pass": gate_pass,
                     "valuation_percentile": float(latest["valuation_percentile"]),
                     "attention_rank_pct": float(latest["attention_rank_pct"]),
@@ -493,7 +535,7 @@ class StrategyEngine:
                 trend = 0.45 * item["momentum_rank_score"] + 0.35 * item["rs_score"] + 0.2 * item["asi_score"]
             else:
                 trend = 0.55 * item["momentum_rank_score"] + 0.45 * item["rs_score"]
-            item["trend_score"] = round(trend if item["gate_pass"] else 0.0, 2)
+            item["trend_score"] = round(trend * item["gate_weight"], 2)
             item["multiplier"] = self.valuation.multiplier(item["valuation_percentile"])
         result = sorted(raw, key=lambda row: row["trend_score"], reverse=True)
         self._signal_cache[date] = copy.deepcopy(result)
@@ -503,12 +545,13 @@ class StrategyEngine:
         dates = self.dates_until(end_date)
         month_days = first_business_days(dates)
         check_days = weekly_check_days(dates)
+        allocation = self._allocation_config()
         reserve = ReservePool(
             base_amount=float(self.config["base_amount"]),
-            max_months=6,
+            max_months=int(allocation.get("reserve_cap_months", 2)),
             cash_rate=float(self.config["cash_rate"]),
         )
-        positions = {sector: Position() for sector in self.sectors}
+        positions = {sector: Position() for sector in self.trade_sectors}
         trackers = {sector: ExitTracker() for sector in self.sectors}
         timeline: dict[str, list[dict[str, Any]]] = {sector: [] for sector in self.sectors}
         account_curve: list[dict[str, Any]] = []
@@ -528,15 +571,26 @@ class StrategyEngine:
 
             if date in month_days:
                 planned_contribution += float(self.config["base_amount"])
-                selected = [
-                    item
-                    for item in decision_signals
-                    if item["gate_pass"] and item["multiplier"] > 0
-                ][: int(self.config["max_selected_sectors"])]
-                if not selected:
-                    reserve.deposit(float(self.config["base_amount"]), date, "门控未通过或估值硬停")
+                if allocation.get("enabled", True):
+                    self._allocate_month(
+                        date,
+                        decision_signals,
+                        positions,
+                        reserve,
+                        actions_by_date,
+                        trackers,
+                        planned_contribution,
+                    )
                 else:
-                    self._invest_month(date, selected, positions, reserve, actions_by_date, trackers)
+                    selected = [
+                        item
+                        for item in decision_signals
+                        if item["gate_pass"] and item["multiplier"] > 0
+                    ][: int(self.config["max_selected_sectors"])]
+                    if not selected:
+                        reserve.deposit(float(self.config["base_amount"]), date, "门控未通过或估值硬停")
+                    else:
+                        self._invest_month(date, selected, positions, reserve, actions_by_date, trackers)
 
             for sector in self.sectors:
                 signal = signal_map[sector]
@@ -557,8 +611,8 @@ class StrategyEngine:
                         "market_value": round(position.market_value(nav), 2),
                     }
                 )
-            nav_map = {sector: signal_map[sector]["fund_nav"] for sector in self.sectors}
-            market_value = sum(positions[sector].market_value(nav_map[sector]) for sector in self.sectors)
+            nav_map = self._nav_map(date, signal_map)
+            market_value = sum(positions[sector].market_value(nav_map[sector]) for sector in positions)
             total_invested = sum(position.cumulative_invested for position in positions.values())
             total_assets = market_value + reserve.tactical + reserve.cash_management
             account_curve.append(
@@ -590,6 +644,185 @@ class StrategyEngine:
             "account_curve": account_curve,
             "actions": actions_by_date[-24:],
         }
+
+    def _allocation_config(self) -> dict[str, Any]:
+        return {
+            "enabled": True,
+            "core_sector": self.benchmark,
+            "core_ratio": 0.6,
+            "satellite_ratio": 0.3,
+            "reserve_ratio": 0.1,
+            "reserve_cap_months": 2,
+            "min_deployment_ratio": 0.75,
+            "fallback_to_core": True,
+            **self.config.get("allocation", {}),
+        }
+
+    def _allocate_month(
+        self,
+        date: str,
+        decision_signals: list[dict[str, Any]],
+        positions: dict[str, Position],
+        reserve: ReservePool,
+        actions: list[dict[str, Any]],
+        trackers: dict[str, ExitTracker],
+        planned_contribution: float,
+    ) -> None:
+        allocation = self._allocation_config()
+        budget = float(self.config["base_amount"])
+        core_budget = budget * float(allocation.get("core_ratio", 0.6))
+        satellite_budget = budget * float(allocation.get("satellite_ratio", 0.3))
+        reserve_budget = max(0.0, budget - core_budget - satellite_budget)
+        reserve_budget = budget * float(allocation.get("reserve_ratio", reserve_budget / budget if budget else 0))
+
+        core_budget += self._deposit_to_tactical_or_return_overflow(reserve, reserve_budget, date, "月度战术储备")
+        satellite_spent = self._invest_satellite_budget(date, satellite_budget, decision_signals, positions, reserve, actions, trackers)
+        unspent_satellite = max(0.0, satellite_budget - satellite_spent)
+        if bool(allocation.get("fallback_to_core", True)):
+            core_budget += unspent_satellite
+        else:
+            core_budget += self._deposit_to_tactical_or_return_overflow(reserve, unspent_satellite, date, "卫星仓未用预算")
+
+        if core_budget > 0:
+            self._buy_core(date, core_budget, positions, actions, "核心仓/高估预算转投")
+        self._enforce_minimum_deployment(date, positions, reserve, actions, planned_contribution)
+
+    def _invest_satellite_budget(
+        self,
+        date: str,
+        budget: float,
+        decision_signals: list[dict[str, Any]],
+        positions: dict[str, Position],
+        reserve: ReservePool,
+        actions: list[dict[str, Any]],
+        trackers: dict[str, ExitTracker],
+    ) -> float:
+        if budget <= 0:
+            return 0.0
+        selected = [
+            item
+            for item in decision_signals
+            if item["gate_weight"] >= float(self.config["gate"].get("min_weight", 0.35))
+            and item["multiplier"] > 0
+            and trackers[item["sector"]].level < 2
+        ][: int(self.config["max_selected_sectors"])]
+        if not selected:
+            return 0.0
+
+        score_sum = sum(max(0.01, item["trend_score"]) for item in selected)
+        desired: list[tuple[dict[str, Any], float]] = []
+        account_base = self._total_assets(date, positions, reserve) + budget
+        single_limit = float(self.config.get("portfolio_limits", {}).get("single_sector", 1.0))
+        for item in selected:
+            base_alloc = budget * max(0.01, item["trend_score"]) / score_sum
+            current_value = positions[item["sector"]].market_value(item["fund_nav"])
+            cap_amount = max(0.0, account_base * single_limit - current_value)
+            desired.append((item, min(base_alloc * item["multiplier"], cap_amount)))
+
+        desired_total = sum(amount for _, amount in desired)
+        if desired_total > budget:
+            extra = reserve.withdraw(desired_total - budget, date, "低估卫星仓加码")
+            scale = (budget + extra) / desired_total if desired_total else 0.0
+        else:
+            scale = 1.0
+
+        spent = 0.0
+        for item, amount in desired:
+            actual = amount * scale
+            if actual <= 0:
+                continue
+            buy_result = positions[item["sector"]].buy(actual, item["fund_nav"], date)
+            spent += actual
+            actions.append(self._buy_action(date, item, actual, buy_result["shares"], f"连续门控权重 {item['gate_weight']:.2f}，倍率 {item['multiplier']:.2f}"))
+        return spent
+
+    def _buy_core(
+        self,
+        date: str,
+        amount: float,
+        positions: dict[str, Position],
+        actions: list[dict[str, Any]],
+        reason: str,
+    ) -> None:
+        core = self.core_sector
+        if amount <= 0 or core not in positions:
+            return
+        frame = self._series_cache[core].loc[:date]
+        if frame.empty:
+            return
+        nav = float(frame.iloc[-1]["fund_nav"])
+        buy_result = positions[core].buy(amount, nav, date)
+        actions.append(
+            {
+                "date": date,
+                "signal_date": date,
+                "order_date": date,
+                "nav_date": date,
+                "shares_confirm_date": add_business_days(date, 1),
+                "sector": core,
+                "action": "buy",
+                "amount": round(amount, 2),
+                "shares": round(buy_result["shares"], 4),
+                "reason": reason,
+            }
+        )
+
+    def _enforce_minimum_deployment(
+        self,
+        date: str,
+        positions: dict[str, Position],
+        reserve: ReservePool,
+        actions: list[dict[str, Any]],
+        planned_contribution: float,
+    ) -> None:
+        min_ratio = float(self._allocation_config().get("min_deployment_ratio", 0))
+        if min_ratio <= 0 or planned_contribution <= 0:
+            return
+        invested = sum(position.cumulative_invested for position in positions.values())
+        shortfall = planned_contribution * min_ratio - invested
+        if shortfall <= 0:
+            return
+        actual = reserve.withdraw(shortfall, date, "最低部署率补足核心仓")
+        if actual > 0:
+            self._buy_core(date, actual, positions, actions, "最低部署率补足核心仓")
+
+    def _deposit_to_tactical_or_return_overflow(self, reserve: ReservePool, amount: float, date: str, reason: str) -> float:
+        if amount <= 0:
+            return 0.0
+        room = max(0.0, reserve.cap - reserve.tactical)
+        deposit_amount = min(amount, room)
+        if deposit_amount:
+            reserve.deposit(deposit_amount, date, reason)
+        return amount - deposit_amount
+
+    def _buy_action(self, date: str, item: dict[str, Any], amount: float, shares: float, reason: str) -> dict[str, Any]:
+        return {
+            "date": date,
+            "signal_date": item.get("signal_date", date),
+            "order_date": date,
+            "nav_date": item.get("nav_date", date),
+            "shares_confirm_date": item.get("shares_confirm_date", add_business_days(date, 1)),
+            "sector": item["sector"],
+            "action": "buy",
+            "amount": round(amount, 2),
+            "shares": round(shares, 4),
+            "reason": reason,
+        }
+
+    def _nav_map(self, date: str, signal_map: dict[str, dict[str, Any]] | None = None) -> dict[str, float]:
+        result = {sector: signal["fund_nav"] for sector, signal in (signal_map or {}).items()}
+        for sector in self.trade_sectors:
+            if sector in result:
+                continue
+            frame = self._series_cache[sector].loc[:date]
+            if not frame.empty:
+                result[sector] = float(frame.iloc[-1]["fund_nav"])
+        return result
+
+    def _total_assets(self, date: str, positions: dict[str, Position], reserve: ReservePool) -> float:
+        nav_map = self._nav_map(date)
+        market_value = sum(positions[sector].market_value(nav_map.get(sector, 0.0)) for sector in positions)
+        return market_value + reserve.tactical + reserve.cash_management
 
     def _execution_signals(self, signal_date: str | None, order_date: str) -> list[dict[str, Any]]:
         if not signal_date:
@@ -680,7 +913,8 @@ class StrategyEngine:
     ) -> None:
         if not bool(self.config.get("exit", {}).get("enabled", True)):
             return
-        for sector, position in positions.items():
+        for sector in self.sectors:
+            position = positions[sector]
             if position.cumulative_invested <= 0 or position.shares <= 0:
                 continue
             signal = signals[sector]
@@ -700,18 +934,13 @@ class StrategyEngine:
                 ),
             }
             result = self.exit_manager.update(trackers[sector], state)
-            if result["action"] == "sell_1_3":
-                sale = position.sell_fraction(1 / 3, nav, date)
-                reserve.deposit(sale["net_proceeds"], date, "L2卖出回收")
-            elif result["action"] == "sell_1_2_remaining":
-                sale = position.sell_fraction(1 / 2, nav, date)
-                reserve.deposit(sale["net_proceeds"], date, "L3卖出回收")
-            elif result["action"] == "sell_all":
-                seed = float(self.config["exit"].get("seed_position", 0))
-                sale = position.sell_fraction(1 - seed, nav, date)
-                reserve.deposit(sale["net_proceeds"], date, "L4清仓回收")
+            if result["action"] in {"sell_1_3", "sell_1_2_remaining", "sell_all"}:
+                sale = self._sell_to_exit_target(date, sector, position, nav, positions, reserve, result["level"])
+                reserve.deposit(sale["net_proceeds"], date, f"{result['level']}目标权重下调回收")
+                action_name = "target_weight_reduce"
             else:
                 sale = {"net_proceeds": 0.0, "shares": 0.0, "redemption_fee": 0.0}
+                action_name = result["action"]
             if result["action"] != "hold":
                 actions.append(
                     {
@@ -721,13 +950,38 @@ class StrategyEngine:
                         "nav_date": signal.get("nav_date", date),
                         "cash_settlement_date": signal.get("cash_settlement_date", add_business_days(date, 3)),
                         "sector": sector,
-                        "action": result["action"],
+                        "action": action_name,
                         "amount": round(sale["net_proceeds"], 2),
                         "shares": round(sale["shares"], 4),
                         "redemption_fee": round(sale["redemption_fee"], 2),
                         "reason": result["reason"],
                     }
                 )
+
+    def _sell_to_exit_target(
+        self,
+        date: str,
+        sector: str,
+        position: Position,
+        nav: float,
+        positions: dict[str, Position],
+        reserve: ReservePool,
+        level: str,
+    ) -> dict[str, float]:
+        factors = self.config.get("exit", {}).get("target_weight_factors", {})
+        factor = float(factors.get(level, 1.0))
+        base_weight = float(
+            self.config.get("exit", {}).get(
+                "target_sector_weight",
+                self.config.get("portfolio_limits", {}).get("single_sector", 1.0),
+            )
+        )
+        target_value = self._total_assets(date, positions, reserve) * base_weight * factor
+        current_value = position.market_value(nav)
+        sell_value = max(0.0, current_value - target_value)
+        if nav <= 0 or sell_value <= 0:
+            return {"net_proceeds": 0.0, "shares": 0.0, "redemption_fee": 0.0}
+        return position.sell_shares(sell_value / nav, nav, date)
 
     def _attach_latest_state(
         self,
@@ -764,15 +1018,17 @@ class StrategyEngine:
         total_planned: float | None = None,
     ) -> dict[str, Any]:
         nav_map = {item["sector"]: item["fund_nav"] for item in signals}
-        for sector in self.sectors:
+        for sector in self.trade_sectors:
             if sector not in nav_map:
                 nav_map[sector] = float(self._series_cache[sector].iloc[-1]["fund_nav"])
-        market_value = sum(positions[sector].market_value(nav_map[sector]) for sector in self.sectors)
+        market_value = sum(positions[sector].market_value(nav_map[sector]) for sector in positions)
         invested = sum(position.cumulative_invested for position in positions.values())
         total_assets = market_value + reserve.tactical + reserve.cash_management
         total_profit = total_assets - invested
         planned = invested if total_planned is None else total_planned
         planned_profit = total_assets - planned
+        cash_value = reserve.tactical + reserve.cash_management
+        deployment_ratio = invested / planned if planned else 0.0
         return {
             "base_amount": float(self.config["base_amount"]),
             "tactical_reserve": round(reserve.tactical, 2),
@@ -786,6 +1042,8 @@ class StrategyEngine:
             "planned_profit": round(planned_profit, 2),
             "planned_return": pct(planned_profit / planned) if planned else 0.0,
             "cash_rate": float(self.config["cash_rate"]),
+            "deployment_ratio": pct(deployment_ratio),
+            "cash_drag": pct(cash_value / total_assets) if total_assets else 0.0,
         }
 
     def _exit_states(self, trackers: dict[str, ExitTracker]) -> list[dict[str, Any]]:

@@ -124,7 +124,7 @@ def get_trial_run(mode: str = Query(default="paper")) -> dict[str, Any]:
 @app.get("/api/dashboard")
 def get_dashboard(date: str | None = Query(default=None)) -> dict[str, Any]:
     provider, config = _provider_and_config()
-    return _public_dashboard(_cached_dashboard(_config_key(config), date))
+    return _json_safe(_public_dashboard(_cached_dashboard(_config_key(config), date)))
 
 
 @app.get("/api/series")
@@ -155,4 +155,4 @@ def simulate(request: SimulateRequest) -> dict[str, Any]:
         "points": dashboard["timeline"][selected_sector],
         "exit_state": next((item for item in dashboard["exit_states"] if item["sector"] == selected_sector), None),
     }
-    return {"dashboard": _public_dashboard(dashboard), "series": series, "config": config}
+    return _json_safe({"dashboard": _public_dashboard(dashboard), "series": series, "config": config})
