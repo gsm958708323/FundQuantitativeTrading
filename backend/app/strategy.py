@@ -505,6 +505,8 @@ class StrategyEngine:
         positions = {sector: Position() for sector in self.sectors}
         trackers = {sector: ExitTracker() for sector in self.sectors}
         timeline: dict[str, list[dict[str, Any]]] = {sector: [] for sector in self.sectors}
+        account_curve: list[dict[str, Any]] = []
+        planned_contribution = 0.0
         actions_by_date: list[dict[str, Any]] = []
 
         for index, date in enumerate(dates):
@@ -519,6 +521,7 @@ class StrategyEngine:
                 self._update_exits(date, decision_signal_map, positions, trackers, reserve, actions_by_date)
 
             if date in month_days:
+                planned_contribution += float(self.config["base_amount"])
                 selected = [
                     item
                     for item in decision_signals
@@ -548,6 +551,25 @@ class StrategyEngine:
                         "market_value": round(position.market_value(nav), 2),
                     }
                 )
+            nav_map = {sector: signal_map[sector]["fund_nav"] for sector in self.sectors}
+            market_value = sum(positions[sector].market_value(nav_map[sector]) for sector in self.sectors)
+            total_invested = sum(position.cumulative_invested for position in positions.values())
+            total_assets = market_value + reserve.tactical + reserve.cash_management
+            account_curve.append(
+                {
+                    "date": date,
+                    "market_value": round(market_value, 2),
+                    "tactical_reserve": round(reserve.tactical, 2),
+                    "cash_management": round(reserve.cash_management, 2),
+                    "total_assets": round(total_assets, 2),
+                    "total_invested": round(total_invested, 2),
+                    "total_planned": round(planned_contribution, 2),
+                    "account_return": pct((total_assets - total_invested) / total_invested) if total_invested else 0.0,
+                    "planned_return": pct((total_assets - planned_contribution) / planned_contribution)
+                    if planned_contribution
+                    else 0.0,
+                }
+            )
 
         latest = dates[-1]
         latest_signals = self.compute_signals(latest)
@@ -555,10 +577,11 @@ class StrategyEngine:
         return {
             "date": latest,
             "signals": latest_signals,
-            "portfolio": self._portfolio_state(latest_signals, positions, reserve),
+            "portfolio": self._portfolio_state(latest_signals, positions, reserve, planned_contribution),
             "exit_states": self._exit_states(trackers),
             "reserve_flows": reserve.flows[-16:],
             "timeline": timeline,
+            "account_curve": account_curve,
             "actions": actions_by_date[-24:],
         }
 
@@ -730,6 +753,7 @@ class StrategyEngine:
         signals: list[dict[str, Any]],
         positions: dict[str, Position],
         reserve: ReservePool,
+        total_planned: float | None = None,
     ) -> dict[str, Any]:
         nav_map = {item["sector"]: item["fund_nav"] for item in signals}
         for sector in self.sectors:
@@ -739,15 +763,20 @@ class StrategyEngine:
         invested = sum(position.cumulative_invested for position in positions.values())
         total_assets = market_value + reserve.tactical + reserve.cash_management
         total_profit = total_assets - invested
+        planned = invested if total_planned is None else total_planned
+        planned_profit = total_assets - planned
         return {
             "base_amount": float(self.config["base_amount"]),
             "tactical_reserve": round(reserve.tactical, 2),
             "cash_management": round(reserve.cash_management, 2),
             "market_value": round(market_value, 2),
             "total_invested": round(invested, 2),
+            "total_planned": round(planned, 2),
             "total_assets": round(total_assets, 2),
             "total_profit": round(total_profit, 2),
             "account_return": pct(total_profit / invested) if invested else 0.0,
+            "planned_profit": round(planned_profit, 2),
+            "planned_return": pct(planned_profit / planned) if planned else 0.0,
             "cash_rate": float(self.config["cash_rate"]),
         }
 

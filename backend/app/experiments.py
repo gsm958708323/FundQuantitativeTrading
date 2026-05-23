@@ -26,7 +26,7 @@ def _valuation_elasticity(frame: pd.DataFrame, config: dict[str, Any]) -> dict[s
     baseline = simple_dca(frame, sector, budget, elastic=False)
     strategy = simple_dca(frame, sector, budget, elastic=True, cash_rate=float(config["cash_rate"]))
     cost_delta = baseline["average_cost"] - strategy["average_cost"]
-    passed = strategy["summary"]["total_return"] >= baseline["summary"]["total_return"] and cost_delta >= 0
+    passed = bool(strategy["summary"]["total_return"] >= baseline["summary"]["total_return"] and cost_delta >= 0)
     return {
         "name": "valuation_elasticity",
         "baseline": {**baseline["summary"], "average_cost": baseline["average_cost"]},
@@ -62,7 +62,7 @@ def _trend_gate(frame: pd.DataFrame, config: dict[str, Any]) -> dict[str, Any]:
         "name": "trend_gate",
         "baseline": {"future_60d_avg": round(closed_avg, 2), "positive_ratio": round(closed_positive, 2)},
         "strategy": {"future_60d_avg": round(open_avg, 2), "positive_ratio": round(open_positive, 2)},
-        "passed": open_avg > closed_avg or open_positive > closed_positive,
+        "passed": bool(open_avg > closed_avg or open_positive > closed_positive),
         "reason": f"门控通过未来60日均值 {round(open_avg, 2)}%，关闭均值 {round(closed_avg, 2)}%",
     }
 
@@ -88,7 +88,7 @@ def _tiered_exit(frame: pd.DataFrame, config: dict[str, Any]) -> dict[str, Any]:
         "name": "tiered_exit",
         "baseline": base,
         "strategy": strategy,
-        "passed": strategy["max_drawdown"] <= base["max_drawdown"] or strategy["account_return"] >= base["account_return"],
+        "passed": bool(strategy["max_drawdown"] <= base["max_drawdown"] or strategy["account_return"] >= base["account_return"]),
         "reason": f"四级退出回撤 {strategy['max_drawdown']}%，无止盈回撤 {base['max_drawdown']}%",
     }
 

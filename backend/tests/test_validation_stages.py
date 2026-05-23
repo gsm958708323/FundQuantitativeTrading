@@ -38,6 +38,24 @@ def test_full_backtest_report_contains_baselines_ablation_and_checks():
     assert report["worst_periods"]
 
 
+def test_full_backtest_drawdown_uses_total_account_assets_not_position_value_only():
+    from app.backtest import run_full_backtest
+
+    report = run_full_backtest(generate_sample_data(), load_config())
+
+    assert report["summary"]["max_drawdown"] < 20
+    assert report["ablation"]["exit"]["with_module"]["max_drawdown"] < 20
+
+
+def test_full_backtest_reports_return_against_planned_contributions():
+    from app.backtest import run_full_backtest
+
+    report = run_full_backtest(generate_sample_data(), load_config())
+
+    assert report["summary"]["total_planned"] == 36000
+    assert report["summary"]["planned_return"] == round((report["summary"]["total_assets"] - 36000) / 36000 * 100, 2)
+
+
 def test_trial_run_plan_produces_manual_execution_checklist():
     from app.trial import build_trial_run
 

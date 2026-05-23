@@ -88,6 +88,8 @@ def simple_dca(
 
 
 def dashboard_curve(dashboard: dict[str, Any]) -> list[float]:
+    if dashboard.get("account_curve"):
+        return [float(point["total_assets"]) for point in dashboard["account_curve"]]
     by_date: dict[str, float] = {}
     for points in dashboard.get("timeline", {}).values():
         for point in points:

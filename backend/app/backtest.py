@@ -97,6 +97,27 @@ def _acceptance_checks(dashboard: dict[str, Any]) -> dict[str, dict[str, Any]]:
 
 
 def _worst_periods(dashboard: dict[str, Any], n: int = 3) -> list[dict[str, Any]]:
+    if dashboard.get("account_curve"):
+        points = dashboard["account_curve"]
+        losses = []
+        window = 20
+        for index in range(len(points) - window):
+            start_point = points[index]
+            end_point = points[index + window]
+            start_value = float(start_point["total_assets"])
+            end_value = float(end_point["total_assets"])
+            if start_value <= 0:
+                continue
+            losses.append(
+                {
+                    "start": start_point["date"],
+                    "end": end_point["date"],
+                    "return": round((end_value - start_value) / start_value * 100, 2),
+                }
+            )
+        return sorted(losses, key=lambda item: item["return"])[:n] or [
+            {"start": dashboard["date"], "end": dashboard["date"], "return": 0.0}
+        ]
     curve_by_date: dict[str, float] = {}
     for points in dashboard.get("timeline", {}).values():
         for point in points:
