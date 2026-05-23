@@ -74,9 +74,16 @@ export type DashboardResponse = {
   reserve_flows: ReserveFlow[];
   actions: Array<{
     date: string;
+    signal_date?: string;
+    order_date?: string;
+    nav_date?: string;
+    shares_confirm_date?: string;
+    cash_settlement_date?: string;
     sector: string;
     action: string;
     amount: number;
+    shares?: number;
+    redemption_fee?: number;
     reason: string;
   }>;
 };
@@ -94,4 +101,45 @@ export type ConfigResponse = {
   benchmark: string;
   latest_date: string;
   data_source: string;
+};
+
+export type ValidationExperiment = {
+  name: string;
+  baseline: Record<string, number | string | boolean>;
+  strategy: Record<string, number | string | boolean>;
+  passed: boolean;
+  reason: string;
+};
+
+export type MvbResponse = {
+  stage: "mvb";
+  experiments: ValidationExperiment[];
+};
+
+export type FullBacktestResponse = {
+  stage: "full_backtest";
+  date: string;
+  summary: Record<string, number | string | boolean>;
+  baselines: Record<string, Record<string, number | string | boolean>>;
+  ablation: Record<string, unknown>;
+  checks: Record<string, { passed: boolean; details: string }>;
+  worst_periods: Array<{ start: string; end: string; return: number }>;
+};
+
+export type TrialRunResponse = {
+  stage: "trial_run";
+  mode: string;
+  weekly_decision_date: string;
+  reserve: PortfolioState;
+  recommendations: Array<{
+    sector: string;
+    action: string;
+    suggested_amount: number;
+    gate_pass: boolean;
+    valuation_percentile: number;
+    exit_level: string;
+    reason: string;
+  }>;
+  manual_execution_checklist: string[];
+  logs_to_keep: string[];
 };

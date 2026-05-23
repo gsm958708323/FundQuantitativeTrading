@@ -43,3 +43,61 @@ Check whether the bundled `rg.exe` is blocked by Windows permissions or security
 - Related Files: none
 
 ---
+
+## [ERR-20260523-002] pytest_script_import_path
+
+**Logged**: 2026-05-23T00:00:00+08:00
+**Priority**: low
+**Status**: pending
+**Area**: tests
+
+### Summary
+Running `pytest` directly from `backend` failed to import the local `app` package, while `python -m pytest` used the expected current-directory import path.
+
+### Error
+```text
+ModuleNotFoundError: No module named 'app'
+```
+
+### Context
+- Command attempted: `pytest`
+- Working directory: `C:\Users\Halo\Documents\Jijin\backend`
+- Working command: `python -m pytest`
+
+### Suggested Fix
+Use `python -m pytest` for backend verification, or add a pytest configuration that explicitly sets the Python path.
+
+### Metadata
+- Reproducible: yes
+- Related Files: backend/tests/test_api.py, backend/tests/test_strategy.py
+
+---
+
+## [ERR-20260523-003] vite_build_sandbox_access
+
+**Logged**: 2026-05-23T00:00:00+08:00
+**Priority**: low
+**Status**: pending
+**Area**: frontend
+
+### Summary
+`npm run build` failed inside the sandbox because Vite/esbuild could not read parent directories or resolve `vite.config.ts`; rerunning with approved escalation succeeded.
+
+### Error
+```text
+Cannot read directory "../../..": Access is denied.
+Could not resolve "C:\\Users\\Halo\\Documents\\Jijin\\frontend\\vite.config.ts"
+```
+
+### Context
+- Command attempted: `npm run build`
+- Working directory: `C:\Users\Halo\Documents\Jijin\frontend`
+
+### Suggested Fix
+Use the approved `npm run build` escalation rule when sandboxed builds hit Windows access-denied errors.
+
+### Metadata
+- Reproducible: unknown
+- Related Files: frontend/vite.config.ts
+
+---

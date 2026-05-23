@@ -1,6 +1,16 @@
 from app.config import load_config
 from app.sample_data import generate_sample_data
-from app.strategy import ExitManager, ExitTracker, ReservePool, ValuationEngine, build_dashboard
+import pandas as pd
+
+from app.strategy import (
+    ExitManager,
+    ExitTracker,
+    Position,
+    ReservePool,
+    StrategyEngine,
+    ValuationEngine,
+    build_dashboard,
+)
 
 
 def test_hard_stop_multiplier_is_zero():
@@ -50,3 +60,142 @@ def test_l4_requires_second_confirmation():
     second = manager.update(tracker, state)
     assert second["action"] == "sell_all"
     assert second["level"] == "L4"
+
+
+def test_l2_requires_two_consecutive_rs_weak_checks():
+    config = load_config()
+    manager = ExitManager(config["exit"])
+    tracker = ExitTracker(level=1, r_peak=0.2)
+    state = {
+        "r_campaign": 0.2,
+        "r_position": 0.2,
+        "percentile": 70,
+        "rs_strong": False,
+        "ma_state": "上升",
+        "momentum": 5,
+        "gate_pass": True,
+        "asi": None,
+        "asi_enabled": False,
+        "valuation_fell_from_extreme": False,
+    }
+
+    first = manager.update(tracker, state)
+    second = manager.update(tracker, state)
+
+    assert first["level"] == "L1"
+    assert first["action"] == "hold"
+    assert second["level"] == "L2"
+    assert second["action"] == "sell_1_3"
+
+
+def test_account_profit_does_not_double_count_redeemed_cash():
+    config = load_config()
+    engine = StrategyEngine(generate_sample_data(), config)
+    reserve = ReservePool(base_amount=1000)
+    positions = {sector: Position() for sector in config["sectors"]}
+    positions["科技"].buy(1000, 1.0, "2025-01-01")
+    sale = positions["科技"].sell_fraction(1.0, 1.1, "2027-02-01")
+    reserve.deposit(sale["net_proceeds"], "2027-02-01", "test sale")
+
+    state = engine._portfolio_state([{"sector": "科技", "fund_nav": 1.1}], positions, reserve)
+
+    assert state["total_assets"] == 1100
+    assert state["total_profit"] == 100
+
+
+def test_buy_actions_record_signal_order_nav_and_settlement_dates():
+    config = load_config()
+    result = build_dashboard(generate_sample_data(), config)
+    buy = next(action for action in result["actions"] if action["action"] == "buy")
+
+    assert buy["signal_date"] < buy["date"]
+    assert buy["order_date"] == buy["date"]
+    assert buy["nav_date"] == buy["date"]
+    assert buy["shares_confirm_date"] > buy["date"]
+
+
+def test_fifo_sale_uses_oldest_lots_and_redemption_fees():
+    position = Position()
+    position.buy(1000, 1.0, "2025-01-01")
+    position.buy(1000, 2.0, "2025-03-01")
+
+    sale = position.sell_fraction(0.5, 2.0, "2025-03-15")
+
+    assert round(sale["gross_proceeds"], 2) == 1500
+    assert round(sale["redemption_fee"], 2) == 7.5
+    assert round(sale["net_proceeds"], 2) == 1492.5
+    assert round(position.shares, 4) == 750
+    assert [round(lot["shares"], 4) for lot in position.lots] == [250, 500]
+
+
+def test_l1_exit_state_blocks_new_monthly_buying():
+    frame = generate_sample_data()
+    config = load_config()
+    engine = StrategyEngine(frame, config)
+    reserve = ReservePool(base_amount=2000)
+    positions = {sector: Position() for sector in config["sectors"]}
+    trackers = {sector: ExitTracker(level=1) for sector in config["sectors"]}
+    actions: list[dict] = []
+    date = engine.dates_until()[150]
+    selected = [item for item in engine.compute_signals(date) if item["gate_pass"] and item["multiplier"] > 0][:1]
+
+    engine._invest_month(date, selected, positions, reserve, actions, trackers)
+
+    assert not any(action["action"] == "buy" for action in actions)
+    assert round(reserve.tactical, 2) == 2000
+
+
+def test_portfolio_single_sector_limit_caps_new_exposure():
+    frame = generate_sample_data()
+    config = load_config({"portfolio_limits": {"single_sector": 0.2}})
+    engine = StrategyEngine(frame, config)
+    reserve = ReservePool(base_amount=2000)
+    positions = {sector: Position() for sector in config["sectors"]}
+    trackers = {sector: ExitTracker() for sector in config["sectors"]}
+    actions: list[dict] = []
+    date = engine.dates_until()[150]
+    selected = [item for item in engine.compute_signals(date) if item["gate_pass"] and item["multiplier"] > 0][:1]
+
+    engine._invest_month(date, selected, positions, reserve, actions, trackers)
+
+    assert actions
+    assert actions[0]["amount"] <= 400
+    assert round(reserve.tactical, 2) >= 1600
+
+
+def test_csv_provider_audits_usable_from_and_missing_ratios(tmp_path):
+    from app.data_provider import CsvDataProvider
+
+    csv_path = tmp_path / "market.csv"
+    pd.DataFrame(
+        [
+            {
+                "date": "2025-01-01",
+                "sector": "科技",
+                "index_price": 1000,
+                "fund_nav": 1.0,
+                "valuation_percentile": 20,
+                "attention_rank_pct": 30,
+                "fund_start_date": "2025-01-03",
+                "valuation_metric": "PB",
+            },
+            {
+                "date": "2025-01-02",
+                "sector": "科技",
+                "index_price": 1001,
+                "fund_nav": 1.01,
+                "valuation_percentile": None,
+                "attention_rank_pct": 30,
+                "fund_start_date": "2025-01-03",
+                "valuation_metric": "PB",
+            },
+        ]
+    ).to_csv(csv_path, index=False, encoding="utf-8")
+
+    provider = CsvDataProvider(csv_path)
+    audit = provider.audit()
+
+    assert audit[0]["sector"] == "科技"
+    assert audit[0]["usable_from"] == "2025-01-03"
+    assert audit[0]["missing_valuation_ratio"] == 0.5
+    assert audit[0]["audit_status"] == "fail"

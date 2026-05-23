@@ -40,6 +40,23 @@ def weekly_check_days(dates: list[str]) -> set[str]:
     return result
 
 
+def add_business_days(date: str, days: int) -> str:
+    return pd.bdate_range(pd.Timestamp(date), periods=days + 1)[-1].date().isoformat()
+
+
+def redemption_fee_rate(buy_date: str, sell_date: str) -> float:
+    holding_days = max(0, (pd.Timestamp(sell_date) - pd.Timestamp(buy_date)).days)
+    if holding_days < 7:
+        return 0.015
+    if holding_days < 30:
+        return 0.01
+    if holding_days < 180:
+        return 0.005
+    if holding_days < 730:
+        return 0.0025
+    return 0.0
+
+
 class MomentumScorer:
     def __init__(self, weights: dict[str, float] | None = None):
         self.weights = {int(k): float(v) for k, v in (weights or {"20": 0.2, "60": 0.3, "120": 0.5}).items()}
@@ -185,22 +202,62 @@ class Position:
     cumulative_invested: float = 0.0
     cost_remaining: float = 0.0
     realized_cash: float = 0.0
+    redemption_fees: float = 0.0
+    lots: list[dict[str, Any]] = field(default_factory=list)
 
-    def buy(self, amount: float, nav: float) -> None:
+    def buy(self, amount: float, nav: float, date: str = "", fee_rate: float = 0.0) -> dict[str, float]:
         if amount <= 0 or nav <= 0:
-            return
-        self.shares += amount / nav
+            return {"shares": 0.0, "fee": 0.0, "net_amount": 0.0}
+        fee = amount * max(0.0, fee_rate)
+        net_amount = max(0.0, amount - fee)
+        shares = net_amount / nav
+        self.shares += shares
         self.cumulative_invested += amount
-        self.cost_remaining += amount
+        self.cost_remaining += net_amount
+        self.lots.append({"date": date, "shares": shares, "cost": net_amount, "nav": nav})
+        return {"shares": shares, "fee": fee, "net_amount": net_amount}
 
-    def sell_fraction(self, fraction: float, nav: float) -> float:
+    def sell_fraction(self, fraction: float, nav: float, date: str = "") -> dict[str, float]:
         fraction = max(0.0, min(1.0, fraction))
-        shares_to_sell = self.shares * fraction
-        proceeds = shares_to_sell * nav
+        return self.sell_shares(self.shares * fraction, nav, date)
+
+    def sell_shares(self, shares: float, nav: float, date: str = "") -> dict[str, float]:
+        shares_to_sell = min(max(0.0, shares), self.shares)
+        remaining = shares_to_sell
+        gross_proceeds = 0.0
+        redemption_fee = 0.0
+        cost_reduced = 0.0
+        updated_lots: list[dict[str, Any]] = []
+
+        for lot in self.lots:
+            lot_shares = float(lot["shares"])
+            if remaining <= 1e-12:
+                updated_lots.append(lot)
+                continue
+            sold = min(lot_shares, remaining)
+            kept = lot_shares - sold
+            lot_gross = sold * nav
+            fee_rate = redemption_fee_rate(str(lot.get("date", date)), date) if date else 0.0
+            gross_proceeds += lot_gross
+            redemption_fee += lot_gross * fee_rate
+            cost_reduced += float(lot["cost"]) * (sold / lot_shares) if lot_shares else 0.0
+            remaining -= sold
+            if kept > 1e-12:
+                kept_ratio = kept / lot_shares
+                updated_lots.append({**lot, "shares": kept, "cost": float(lot["cost"]) * kept_ratio})
+
+        net_proceeds = gross_proceeds - redemption_fee
+        self.lots = updated_lots
         self.shares -= shares_to_sell
-        self.realized_cash += proceeds
-        self.cost_remaining *= 1 - fraction
-        return proceeds
+        self.realized_cash += net_proceeds
+        self.redemption_fees += redemption_fee
+        self.cost_remaining = max(0.0, self.cost_remaining - cost_reduced)
+        return {
+            "shares": shares_to_sell,
+            "gross_proceeds": gross_proceeds,
+            "redemption_fee": redemption_fee,
+            "net_proceeds": net_proceeds,
+        }
 
     def market_value(self, nav: float) -> float:
         return self.shares * nav
@@ -222,6 +279,8 @@ class ExitTracker:
     r_peak: float = 0.0
     pending_l4: bool = False
     recovery_count: int = 0
+    rs_weak_count: int = 0
+    extreme_valuation_seen: bool = False
     reason: str = "正常持有"
     last_action: str = "hold"
 
@@ -241,6 +300,9 @@ class ExitManager:
         r_position = float(state["r_position"])
         asi = state.get("asi")
         asi_enabled = bool(state.get("asi_enabled"))
+        if percentile >= float(self.config.get("l2_percentile", 90)):
+            tracker.extreme_valuation_seen = True
+        tracker.rs_weak_count = tracker.rs_weak_count + 1 if not rs_strong else 0
 
         action = "hold"
         reason = tracker.reason
@@ -270,7 +332,7 @@ class ExitManager:
             tracker.level = 1
             action = "stop_invest"
             reason = "L1：高估/注意力饱和/收益保护"
-        elif tracker.level == 1 and self._l2(percentile, drawdown, tracker.r_peak, rs_strong):
+        elif tracker.level == 1 and self._l2(percentile, drawdown, tracker.r_peak, tracker.rs_weak_count):
             tracker.level = 2
             action = "sell_1_3"
             reason = "L2：RS走弱、极端高估或收益回撤"
@@ -302,8 +364,8 @@ class ExitManager:
             return True
         return asi_enabled and asi is not None and asi <= 0
 
-    def _l2(self, percentile: float, drawdown: float, r_peak: float, rs_strong: bool) -> bool:
-        if not rs_strong:
+    def _l2(self, percentile: float, drawdown: float, r_peak: float, rs_weak_count: int) -> bool:
+        if rs_weak_count >= 2:
             return True
         if percentile >= float(self.config.get("l2_percentile", 90)):
             return True
@@ -445,20 +507,27 @@ class StrategyEngine:
         timeline: dict[str, list[dict[str, Any]]] = {sector: [] for sector in self.sectors}
         actions_by_date: list[dict[str, Any]] = []
 
-        for date in dates:
+        for index, date in enumerate(dates):
             reserve.accrue()
             signals = self.compute_signals(date)
             signal_map = {item["sector"]: item for item in signals}
+            signal_date = dates[index - 1] if index > 0 else None
+            decision_signals = self._execution_signals(signal_date, date) if signal_date else []
+            decision_signal_map = {item["sector"]: item for item in decision_signals}
+
+            if date in check_days and decision_signal_map:
+                self._update_exits(date, decision_signal_map, positions, trackers, reserve, actions_by_date)
 
             if date in month_days:
-                selected = [item for item in signals if item["gate_pass"] and item["multiplier"] > 0][: int(self.config["max_selected_sectors"])]
+                selected = [
+                    item
+                    for item in decision_signals
+                    if item["gate_pass"] and item["multiplier"] > 0
+                ][: int(self.config["max_selected_sectors"])]
                 if not selected:
                     reserve.deposit(float(self.config["base_amount"]), date, "门控未通过或估值硬停")
                 else:
-                    self._invest_month(date, selected, positions, reserve, actions_by_date)
-
-            if date in check_days:
-                self._update_exits(date, signal_map, positions, trackers, reserve, actions_by_date)
+                    self._invest_month(date, selected, positions, reserve, actions_by_date, trackers)
 
             for sector in self.sectors:
                 signal = signal_map[sector]
@@ -493,6 +562,27 @@ class StrategyEngine:
             "actions": actions_by_date[-24:],
         }
 
+    def _execution_signals(self, signal_date: str | None, order_date: str) -> list[dict[str, Any]]:
+        if not signal_date:
+            return []
+        signals = self.compute_signals(signal_date)
+        result: list[dict[str, Any]] = []
+        for item in signals:
+            executed = copy.deepcopy(item)
+            frame = self._series_cache[item["sector"]].loc[:order_date]
+            if frame.empty:
+                continue
+            latest = frame.iloc[-1]
+            executed["fund_nav"] = float(latest["fund_nav"])
+            executed["index_price"] = float(latest["index_price"])
+            executed["signal_date"] = signal_date
+            executed["order_date"] = order_date
+            executed["nav_date"] = order_date
+            executed["shares_confirm_date"] = add_business_days(order_date, 1)
+            executed["cash_settlement_date"] = add_business_days(order_date, 3)
+            result.append(executed)
+        return result
+
     def _invest_month(
         self,
         date: str,
@@ -500,13 +590,27 @@ class StrategyEngine:
         positions: dict[str, Position],
         reserve: ReservePool,
         actions: list[dict[str, Any]],
+        trackers: dict[str, ExitTracker] | None = None,
     ) -> None:
         budget = float(self.config["base_amount"])
+        selected = [item for item in selected if trackers is None or trackers[item["sector"]].level == 0]
+        if not selected:
+            reserve.deposit(budget, date, "退出状态禁止加仓")
+            return
         score_sum = sum(max(0.01, item["trend_score"]) for item in selected)
         desired: list[tuple[dict[str, Any], float]] = []
+        account_base = budget + reserve.tactical + reserve.cash_management + sum(
+            positions[sector].market_value(
+                float(self._series_cache[sector].loc[:date].iloc[-1]["fund_nav"])
+            )
+            for sector in self.sectors
+        )
+        single_limit = float(self.config.get("portfolio_limits", {}).get("single_sector", 1.0))
         for item in selected:
             base_alloc = budget * max(0.01, item["trend_score"]) / score_sum
-            desired.append((item, base_alloc * item["multiplier"]))
+            current_value = positions[item["sector"]].market_value(item["fund_nav"])
+            cap_amount = max(0.0, account_base * single_limit - current_value)
+            desired.append((item, min(base_alloc * item["multiplier"], cap_amount)))
         desired_total = sum(amount for _, amount in desired)
         if desired_total <= budget:
             reserve.deposit(budget - desired_total, date, "估值倍率低于预算")
@@ -518,13 +622,20 @@ class StrategyEngine:
             scale = total_available / desired_total if desired_total else 0
         for item, amount in desired:
             actual = amount * scale
-            positions[item["sector"]].buy(actual, item["fund_nav"])
+            if actual <= 0:
+                continue
+            buy_result = positions[item["sector"]].buy(actual, item["fund_nav"], date)
             actions.append(
                 {
                     "date": date,
+                    "signal_date": item.get("signal_date", date),
+                    "order_date": date,
+                    "nav_date": item.get("nav_date", date),
+                    "shares_confirm_date": item.get("shares_confirm_date", add_business_days(date, 1)),
                     "sector": item["sector"],
                     "action": "buy",
                     "amount": round(actual, 2),
+                    "shares": round(buy_result["shares"], 4),
                     "reason": f"门控通过，倍率 {item['multiplier']:.2f}",
                 }
             )
@@ -553,28 +664,36 @@ class StrategyEngine:
                 "gate_pass": signal["gate_pass"],
                 "asi": signal.get("asi"),
                 "asi_enabled": self.config.get("asi_enabled"),
-                "valuation_fell_from_extreme": signal["valuation_percentile"] < 70 and trackers[sector].level >= 2,
+                "valuation_fell_from_extreme": (
+                    signal["valuation_percentile"] < 70 and trackers[sector].extreme_valuation_seen
+                ),
             }
             result = self.exit_manager.update(trackers[sector], state)
             if result["action"] == "sell_1_3":
-                proceeds = position.sell_fraction(1 / 3, nav)
-                reserve.deposit(proceeds, date, "L2卖出回收")
+                sale = position.sell_fraction(1 / 3, nav, date)
+                reserve.deposit(sale["net_proceeds"], date, "L2卖出回收")
             elif result["action"] == "sell_1_2_remaining":
-                proceeds = position.sell_fraction(1 / 2, nav)
-                reserve.deposit(proceeds, date, "L3卖出回收")
+                sale = position.sell_fraction(1 / 2, nav, date)
+                reserve.deposit(sale["net_proceeds"], date, "L3卖出回收")
             elif result["action"] == "sell_all":
                 seed = float(self.config["exit"].get("seed_position", 0))
-                proceeds = position.sell_fraction(1 - seed, nav)
-                reserve.deposit(proceeds, date, "L4清仓回收")
+                sale = position.sell_fraction(1 - seed, nav, date)
+                reserve.deposit(sale["net_proceeds"], date, "L4清仓回收")
             else:
-                proceeds = 0.0
+                sale = {"net_proceeds": 0.0, "shares": 0.0, "redemption_fee": 0.0}
             if result["action"] != "hold":
                 actions.append(
                     {
                         "date": date,
+                        "signal_date": signal.get("signal_date", date),
+                        "order_date": date,
+                        "nav_date": signal.get("nav_date", date),
+                        "cash_settlement_date": signal.get("cash_settlement_date", add_business_days(date, 3)),
                         "sector": sector,
                         "action": result["action"],
-                        "amount": round(proceeds, 2),
+                        "amount": round(sale["net_proceeds"], 2),
+                        "shares": round(sale["shares"], 4),
+                        "redemption_fee": round(sale["redemption_fee"], 2),
                         "reason": result["reason"],
                     }
                 )
@@ -613,11 +732,13 @@ class StrategyEngine:
         reserve: ReservePool,
     ) -> dict[str, Any]:
         nav_map = {item["sector"]: item["fund_nav"] for item in signals}
+        for sector in self.sectors:
+            if sector not in nav_map:
+                nav_map[sector] = float(self._series_cache[sector].iloc[-1]["fund_nav"])
         market_value = sum(positions[sector].market_value(nav_map[sector]) for sector in self.sectors)
         invested = sum(position.cumulative_invested for position in positions.values())
-        realized = sum(position.realized_cash for position in positions.values())
         total_assets = market_value + reserve.tactical + reserve.cash_management
-        total_profit = total_assets + realized - invested
+        total_profit = total_assets - invested
         return {
             "base_amount": float(self.config["base_amount"]),
             "tactical_reserve": round(reserve.tactical, 2),

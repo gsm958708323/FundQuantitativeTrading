@@ -1,4 +1,11 @@
-import type { ConfigResponse, DashboardResponse, SeriesResponse } from "../types";
+import type {
+  ConfigResponse,
+  DashboardResponse,
+  FullBacktestResponse,
+  MvbResponse,
+  SeriesResponse,
+  TrialRunResponse
+} from "../types";
 
 async function request<T>(path: string, init?: RequestInit): Promise<T> {
   const response = await fetch(path, {
@@ -34,4 +41,16 @@ export function simulate(overrides: Record<string, unknown>, sector: string, dat
       body: JSON.stringify({ overrides, sector, date })
     }
   );
+}
+
+export function getMvb() {
+  return request<MvbResponse>("/api/mvb");
+}
+
+export function getFullBacktest() {
+  return request<FullBacktestResponse>("/api/backtest");
+}
+
+export function getTrialRun(mode = "paper") {
+  return request<TrialRunResponse>(`/api/trial-run?mode=${encodeURIComponent(mode)}`);
 }

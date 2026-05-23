@@ -30,3 +30,12 @@ def test_simulate_changes_hard_stop():
     base_zero = sum(1 for item in base["signals"] if item["multiplier"] == 0)
     changed_zero = sum(1 for item in changed["signals"] if item["multiplier"] == 0)
     assert changed_zero >= base_zero
+
+
+def test_data_audit_endpoint_returns_audit_shape():
+    response = client.get("/api/data-audit")
+    assert response.status_code == 200
+    data = response.json()
+    assert data["data_source"] == "sample"
+    assert data["audit"]
+    assert {"sector", "usable_from", "audit_status"} <= set(data["audit"][0])
