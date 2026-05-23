@@ -1,0 +1,44 @@
+{
+  "data_source": "sample",
+  "base_amount": 2000,
+  "max_selected_sectors": 3,
+  "cash_rate": 0.02,
+  "asi_enabled": false,
+  "sectors": ["科技", "半导体", "消费", "医药", "新能源"],
+  "benchmark": "沪深300",
+  "portfolio_limits": {
+    "single_sector": 0.3,
+    "theme_total": 0.5
+  },
+  "momentum": {
+    "weights": {
+      "20": 0.2,
+      "60": 0.3,
+      "120": 0.5
+    }
+  },
+  "rs": {
+    "ma_period": 60
+  },
+  "gate": {
+    "ma_short": 60,
+    "ma_long": 120,
+    "slope_period": 20
+  },
+  "valuation": {
+    "hard_stop_percentile": 80,
+    "k": 1.0
+  },
+  "exit": {
+    "l1_percentile": 80,
+    "l1_profit": 50,
+    "l2_percentile": 90,
+    "l2_drawdown": 8,
+    "l2_min_peak": 30,
+    "l3_drawdown": 15,
+    "l4_drawdown": 20,
+    "recovery_lag": 5,
+    "recovery_weeks": 2,
+    "seed_position": 0.1
+  }
+}
